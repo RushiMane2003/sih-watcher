@@ -1,0 +1,88 @@
+name: Watch SIH page
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 minutes (UTC)
+  workflow_dispatch:         # allow manual run
+
+# Permissions needed to push snapshot and open issues
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check-page:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_URL: "https://sih.gov.in/"  # <-- CHANGE THIS
+      SNAPSHOT_FILE: "snapshot.html"
+      CURRENT_FILE: "current.html"
+      HASH_FILE: "snapshot.sha256"
+      CURRENT_HASH_FILE: "current.sha256"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch page
+        run: |
+          curl -L -sS "$TARGET_URL" -o "$CURRENT_FILE"
+          # Normalize whitespace to reduce false positives:
+          tr -s '[:space:]' ' ' < "$CURRENT_FILE" > tmp && mv tmp "$CURRENT_FILE"
+          # Calculate hash of current content
+          sha256sum "$CURRENT_FILE" | cut -d' ' -f1 > "$CURRENT_HASH_FILE"
+
+      - name: First run? Initialize snapshot if missing (no alert)
+        id: init
+        run: |
+          if [ ! -f "$SNAPSHOT_FILE" ]; then
+            echo "first_run=true" >> $GITHUB_OUTPUT
+            cp "$CURRENT_FILE" "$SNAPSHOT_FILE"
+            cp "$CURRENT_HASH_FILE" "$HASH_FILE"
+          else
+            echo "first_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compare with previous
+        id: diff
+        if: steps.init.outputs.first_run == 'false'
+        run: |
+          if cmp -s "$CURRENT_HASH_FILE" "$HASH_FILE"; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No change."
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Change detected."
+          fi
+
+      - name: Commit updated snapshot (only if changed)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          mv "$CURRENT_FILE" "$SNAPSHOT_FILE"
+          mv "$CURRENT_HASH_FILE" "$HASH_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$SNAPSHOT_FILE" "$HASH_FILE"
+          git commit -m "Snapshot updated: $(date -u +'%Y-%m-%d %H:%M:%S')"
+          git push
+
+      - name: Open a GitHub Issue notification (only if changed)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          TITLE="SIH page changed"
+          BODY=$'The SIH results page changed.\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
+          API="https://api.github.com/repos/${{ github.repository }}/issues"
+          jq -n --arg t "$TITLE" --arg b "$BODY" '{title:$t, body:$b}' > issue.json
+          curl -sS -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               -H "Accept: application/vnd.github+json" \
+               "$API" -d @issue.json
+
+      # # --- OPTIONAL: Telegram push. Set secrets TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable. ---
+      # - name: Telegram notify (only if changed and secrets present)
+      #   if: steps.diff.outputs.changed == 'true' && env.TELEGRAM_ENABLED == 'true'
+      #   env:
+      #     TELEGRAM_ENABLED: ${{ secrets.TELEGRAM_BOT_TOKEN && secrets.TELEGRAM_CHAT_ID && 'true' || 'false' }}
+      #     BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      #     CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+      #   run: |
+      #     MSG="SIH page changed: $TARGET_URL%0A$(date -u +'%Y-%m-%d %H:%M:%S') UTC"
+      #     curl -sS "https://api.telegram.org/bot${BOT}/sendMessage?chat_id=${CHAT}&text=${MSG}" >/dev/null
