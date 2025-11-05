@@ -20,68 +20,90 @@ jobs:
       CURRENT_HASH_FILE: "current.sha256"
 
     steps:
-      - name: Checkout branch (not detached)
+      - name: Checkout repo (pushable)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Debug repo state
+      - name: Print repo context
         run: |
-          echo "ref:       ${{ github.ref }}"
-          echo "ref_name:  ${{ github.ref_name }}"
-          git status
-          git branch -vv
+          echo "github.repository: ${{ github.repository }}"
+          echo "github.ref:        ${{ github.ref }}"
+          echo "github.ref_name:   ${{ github.ref_name }}"
+          git --version
           git remote -v
+          git branch -vv
+          git status
 
-      - name: Fetch page
+      - name: Ensure 'snapshots' branch and switch to it FIRST
         run: |
+          set -euxo pipefail
+          # Fetch the branch if it exists on origin
+          if git ls-remote --exit-code --heads origin snapshots >/dev/null 2>&1; then
+            git fetch origin snapshots:refs/heads/snapshots
+          fi
+          # Create or switch
+          if git show-ref --verify --quiet refs/heads/snapshots; then
+            git switch snapshots
+          else
+            git switch -c snapshots
+          fi
+          echo "Now on branch: $(git branch --show-current)"
+          git status
+
+      - name: Fetch page and compute hash (verbose)
+        run: |
+          set -euxo pipefail
           echo "Fetching: $TARGET_URL"
           curl -L -sS "$TARGET_URL" -o "$CURRENT_FILE"
+          # Normalize whitespace to reduce false positives
           tr -s '[:space:]' ' ' < "$CURRENT_FILE" > tmp && mv tmp "$CURRENT_FILE"
+          # Show a preview for debugging
+          echo "----- current.html (first 200 chars) -----"
+          head -c 200 "$CURRENT_FILE" || true; echo; echo "------------------------------------------"
+          wc -c "$CURRENT_FILE" || true
+          md5sum "$CURRENT_FILE" || true
           sha256sum "$CURRENT_FILE" | cut -d' ' -f1 > "$CURRENT_HASH_FILE"
-          echo "Current hash: $(cat $CURRENT_HASH_FILE)"
+          echo "Current SHA256: $(cat "$CURRENT_HASH_FILE")"
 
-      - name: First run? Initialize snapshot if missing (no alert yet)
+      - name: First run? Initialize snapshot if missing
         id: init
         run: |
+          set -euxo pipefail
           if [ ! -f "$SNAPSHOT_FILE" ]; then
-            echo "No snapshot found. Initializing baseline."
+            echo "No snapshot found on branch 'snapshots' → initializing baseline."
             cp "$CURRENT_FILE" "$SNAPSHOT_FILE"
             cp "$CURRENT_HASH_FILE" "$HASH_FILE"
             echo "first_run=true" >> $GITHUB_OUTPUT
           else
-            echo "Snapshot exists."
+            echo "Baseline exists on branch 'snapshots'."
             echo "first_run=false" >> $GITHUB_OUTPUT
           fi
+          ls -lah || true
 
       - name: Commit baseline snapshot (first run only)
         if: steps.init.outputs.first_run == 'true'
         run: |
-          git config user.name "github-actions[bot]"
+          set -euxo pipefail
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git fetch origin snapshots || true
-          if git ls-remote --exit-code --heads origin snapshots; then
-            git checkout snapshots
-          else
-            git checkout -b snapshots
-          fi
-          
-          git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git commit -m "Update snapshots: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
+          git status
+          git commit -m "Baseline snapshot: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
           git push origin HEAD:snapshots
+          echo "Baseline committed to branch 'snapshots'. Next run will diff & notify."
 
-      - name: Compare with previous
+      - name: Compare with previous (hash vs hash)
         id: diff
         if: steps.init.outputs.first_run == 'false'
         run: |
-          echo "Previous hash: $(cat $HASH_FILE || true)"
-          echo "Current  hash: $(cat $CURRENT_HASH_FILE)"
+          set -euxo pipefail
+          echo "Previous SHA256: $(cat "$HASH_FILE" || true)"
+          echo "Current  SHA256: $(cat "$CURRENT_HASH_FILE")"
           if cmp -s "$CURRENT_HASH_FILE" "$HASH_FILE"; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No change."
+            echo "No change detected."
           else
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "Change detected."
@@ -90,29 +112,36 @@ jobs:
       - name: Commit updated snapshot (only if changed)
         if: steps.diff.outputs.changed == 'true'
         run: |
+          set -euxo pipefail
           mv "$CURRENT_FILE" "$SNAPSHOT_FILE"
           mv "$CURRENT_HASH_FILE" "$HASH_FILE"
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git fetch origin snapshots || true
-          if git ls-remote --exit-code --heads origin snapshots; then
-            git checkout snapshots
-          else
-            git checkout -b snapshots
-          fi
-          
-          git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git commit -m "Update snapshots: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
+          git status
+          git commit -m "Snapshot updated: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
           git push origin HEAD:snapshots
 
-      - name: Open a GitHub Issue notification (only if changed)
+      - name: Open a GitHub Issue (only if changed)
         if: steps.diff.outputs.changed == 'true'
         run: |
+          set -euxo pipefail
           TITLE="Watched page changed"
           BODY=$'The watched page changed.\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
           API="https://api.github.com/repos/${{ github.repository }}/issues"
-          echo "{\"title\":\"$TITLE\",\"body\":\"$BODY\"}" > issue.json
+          printf '{"title":"%s","body":"%s"}' "$TITLE" "$BODY" > issue.json
+          cat issue.json
           curl -sS -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                -H "Accept: application/vnd.github+json" \
                "$API" -d @issue.json
+
+      - name: Upload run artifacts (for debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-files
+          path: |
+            current.html
+            snapshot.html
+            current.sha256
+            snapshot.sha256
+          if-no-files-found: ignore
