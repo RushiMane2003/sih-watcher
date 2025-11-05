@@ -1,4 +1,4 @@
-name: Watch SIH page (PROXY)
+name: Watch SIH page (PLAYWRIGHT)
 
 on:
   schedule:
@@ -13,8 +13,8 @@ jobs:
   check-page:
     runs-on: ubuntu-latest
     env:
-      # Use the proxy! Replace with the exact results page if you have it.
-      TARGET_URL: "https://r.jina.ai/http://sih.gov.in/"
+      # Use the REAL SIH URL here (no proxy)
+      TARGET_URL: "https://sih.gov.in/"
       SNAPSHOT_FILE: "snapshot.html"
       CURRENT_FILE: "current.html"
       HASH_FILE: "snapshot.sha256"
@@ -40,12 +40,43 @@ jobs:
           fi
           echo "On branch: $(git branch --show-current)"
 
-      - name: Fetch page via Jina proxy and hash
+      - name: Install Playwright Chromium
         run: |
           set -euxo pipefail
-          echo "Fetching (proxy): $TARGET_URL"
-          STATUS=$(curl -L -sS -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -o "$CURRENT_FILE" "$TARGET_URL" || true)
-          echo "HTTP status: $STATUS"
+          npm init -y
+          npm i playwright@1
+          npx playwright install --with-deps chromium
+
+      - name: Render page with Playwright and save HTML
+        run: |
+          set -euxo pipefail
+          cat > fetch.js <<'EOF'
+          const fs = require('fs');
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+              viewport: { width: 1366, height: 768 }
+            });
+            const page = await context.newPage();
+            const url = process.env.TARGET_URL;
+            await page.route('**/*', (route) => {
+              const headers = {
+                ...route.request().headers(),
+                'Accept-Language': 'en-US,en;q=0.9'
+              };
+              route.continue({ headers });
+            });
+            await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+            // If there's a specific results selector, wait for it (optional):
+            // await page.waitForSelector('#results-panel', { timeout: 30000 });
+            const html = await page.content();
+            fs.writeFileSync(process.env.CURRENT_FILE, html, 'utf8');
+            await browser.close();
+          })();
+          EOF
+          node fetch.js
           echo "----- current.html preview (first 200 chars) -----"
           head -c 200 "$CURRENT_FILE" || true; echo
           tr -s '[:space:]' ' ' < "$CURRENT_FILE" > tmp && mv tmp "$CURRENT_FILE"
@@ -103,8 +134,8 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         run: |
           set -euxo pipefail
-          TITLE="Watched page changed (proxy)"
-          BODY=$'The watched page changed (via proxy).\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
+          TITLE="Watched page changed (Playwright)"
+          BODY=$'The watched page changed (rendered with Playwright).\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
           API="https://api.github.com/repos/${{ github.repository }}/issues"
           printf '{"title":"%s","body":"%s"}' "$TITLE" "$BODY" > issue.json
           curl -sS -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -114,7 +145,7 @@ jobs:
       - name: Upload artifacts (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: fetched-files-proxy
+          name: fetched-files-playwright
           path: |
             current.html
             snapshot.html
