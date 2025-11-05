@@ -62,8 +62,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git commit -m "Baseline snapshot: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
-          git push origin HEAD:${{ github.ref_name }}
+          git fetch origin snapshots || true
+          if git ls-remote --exit-code --heads origin snapshots; then
+            git checkout snapshots
+          else
+            git checkout -b snapshots
+          fi
+          
+          git add "$SNAPSHOT_FILE" "$HASH_FILE"
+          git commit -m "Update snapshots: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
+          git push origin HEAD:snapshots
 
       - name: Compare with previous
         id: diff
@@ -87,8 +95,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git commit -m "Snapshot updated: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
-          git push origin HEAD:${{ github.ref_name }}
+          git fetch origin snapshots || true
+          if git ls-remote --exit-code --heads origin snapshots; then
+            git checkout snapshots
+          else
+            git checkout -b snapshots
+          fi
+          
+          git add "$SNAPSHOT_FILE" "$HASH_FILE"
+          git commit -m "Update snapshots: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
+          git push origin HEAD:snapshots
 
       - name: Open a GitHub Issue notification (only if changed)
         if: steps.diff.outputs.changed == 'true'
