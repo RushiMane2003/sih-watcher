@@ -1,8 +1,8 @@
-name: Watch SIH page (TEST)
+name: Watch SIH page (PROXY)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes for testing
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,8 @@ jobs:
   check-page:
     runs-on: ubuntu-latest
     env:
-      TARGET_URL: "https://r.jina.ai/http://sih.gov.in/"   # test URL that always changes
+      # Use the proxy! Replace with the exact results page if you have it.
+      TARGET_URL: "https://r.jina.ai/http://sih.gov.in/"
       SNAPSHOT_FILE: "snapshot.html"
       CURRENT_FILE: "current.html"
       HASH_FILE: "snapshot.sha256"
@@ -26,44 +27,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Print repo context
-        run: |
-          echo "github.repository: ${{ github.repository }}"
-          echo "github.ref:        ${{ github.ref }}"
-          echo "github.ref_name:   ${{ github.ref_name }}"
-          git --version
-          git remote -v
-          git branch -vv
-          git status
-
       - name: Ensure 'snapshots' branch and switch to it FIRST
         run: |
           set -euxo pipefail
-          # Fetch the branch if it exists on origin
           if git ls-remote --exit-code --heads origin snapshots >/dev/null 2>&1; then
             git fetch origin snapshots:refs/heads/snapshots
           fi
-          # Create or switch
           if git show-ref --verify --quiet refs/heads/snapshots; then
             git switch snapshots
           else
             git switch -c snapshots
           fi
-          echo "Now on branch: $(git branch --show-current)"
-          git status
+          echo "On branch: $(git branch --show-current)"
 
-      - name: Fetch page and compute hash (verbose)
+      - name: Fetch page via Jina proxy and hash
         run: |
           set -euxo pipefail
-          echo "Fetching: $TARGET_URL"
-          curl -L -sS "$TARGET_URL" -o "$CURRENT_FILE"
-          # Normalize whitespace to reduce false positives
+          echo "Fetching (proxy): $TARGET_URL"
+          STATUS=$(curl -L -sS -w "%{http_code}" -H "User-Agent: Mozilla/5.0" -o "$CURRENT_FILE" "$TARGET_URL" || true)
+          echo "HTTP status: $STATUS"
+          echo "----- current.html preview (first 200 chars) -----"
+          head -c 200 "$CURRENT_FILE" || true; echo
           tr -s '[:space:]' ' ' < "$CURRENT_FILE" > tmp && mv tmp "$CURRENT_FILE"
-          # Show a preview for debugging
-          echo "----- current.html (first 200 chars) -----"
-          head -c 200 "$CURRENT_FILE" || true; echo; echo "------------------------------------------"
-          wc -c "$CURRENT_FILE" || true
-          md5sum "$CURRENT_FILE" || true
           sha256sum "$CURRENT_FILE" | cut -d' ' -f1 > "$CURRENT_HASH_FILE"
           echo "Current SHA256: $(cat "$CURRENT_HASH_FILE")"
 
@@ -72,15 +57,12 @@ jobs:
         run: |
           set -euxo pipefail
           if [ ! -f "$SNAPSHOT_FILE" ]; then
-            echo "No snapshot found on branch 'snapshots' → initializing baseline."
             cp "$CURRENT_FILE" "$SNAPSHOT_FILE"
             cp "$CURRENT_HASH_FILE" "$HASH_FILE"
             echo "first_run=true" >> $GITHUB_OUTPUT
           else
-            echo "Baseline exists on branch 'snapshots'."
             echo "first_run=false" >> $GITHUB_OUTPUT
           fi
-          ls -lah || true
 
       - name: Commit baseline snapshot (first run only)
         if: steps.init.outputs.first_run == 'true'
@@ -89,10 +71,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git status
           git commit -m "Baseline snapshot: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
           git push origin HEAD:snapshots
-          echo "Baseline committed to branch 'snapshots'. Next run will diff & notify."
 
       - name: Compare with previous (hash vs hash)
         id: diff
@@ -103,10 +83,8 @@ jobs:
           echo "Current  SHA256: $(cat "$CURRENT_HASH_FILE")"
           if cmp -s "$CURRENT_HASH_FILE" "$HASH_FILE"; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No change detected."
           else
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Change detected."
           fi
 
       - name: Commit updated snapshot (only if changed)
@@ -118,7 +96,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$SNAPSHOT_FILE" "$HASH_FILE"
-          git status
           git commit -m "Snapshot updated: $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
           git push origin HEAD:snapshots
 
@@ -126,19 +103,18 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         run: |
           set -euxo pipefail
-          TITLE="Watched page changed"
-          BODY=$'The watched page changed.\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
+          TITLE="Watched page changed (proxy)"
+          BODY=$'The watched page changed (via proxy).\n\nURL: '"$TARGET_URL"$'\nTime (UTC): '"$(date -u +'%Y-%m-%d %H:%M:%S')"
           API="https://api.github.com/repos/${{ github.repository }}/issues"
           printf '{"title":"%s","body":"%s"}' "$TITLE" "$BODY" > issue.json
-          cat issue.json
           curl -sS -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                -H "Accept: application/vnd.github+json" \
                "$API" -d @issue.json
 
-      - name: Upload run artifacts (for debugging)
+      - name: Upload artifacts (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: fetched-files
+          name: fetched-files-proxy
           path: |
             current.html
             snapshot.html
