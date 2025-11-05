@@ -13,7 +13,7 @@ jobs:
   check-page:
     runs-on: ubuntu-latest
     env:
-      TARGET_URL: "https://httpbin.org/uuid"   # test URL that always changes
+      TARGET_URL: "https://sih.gov.in/"   # test URL that always changes
       SNAPSHOT_FILE: "snapshot.html"
       CURRENT_FILE: "current.html"
       HASH_FILE: "snapshot.sha256"
